@@ -36,6 +36,14 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
+	"github.com/vmware/govmomi/vim25/soap"
+	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/session"
+	"io/ioutil"
+	"github.com/vmware/govmomi/govc/importx"
+	"github.com/vmware/govmomi/ovf"
+	"github.com/vmware/govmomi/object"
+	"errors"
 )
 
 // GetEnvString returns string from environment variable.
@@ -64,7 +72,7 @@ func GetEnvBool(v string, def bool) bool {
 }
 
 const (
-	envURL      = "GOVMOMI_URL"
+	envURL = "GOVMOMI_URL"
 	envUserName = "GOVMOMI_USERNAME"
 	envPassword = "GOVMOMI_PASSWORD"
 	envInsecure = "GOVMOMI_INSECURE"
@@ -75,6 +83,11 @@ var urlFlag = flag.String("url", GetEnvString(envURL, "https://username:password
 
 var insecureDescription = fmt.Sprintf("Don't verify the server's certificate chain [%s]", envInsecure)
 var insecureFlag = flag.Bool("insecure", GetEnvBool(envInsecure, false), insecureDescription)
+
+var pathFlag = flag.String("path", "", "path for vm")
+var nameFlag = flag.String("name", "osv-automated", "name to create new vm")
+var vmdkAbsolutePathFlag = flag.String("vmdk", "", "path to vmdk on datastore")
+var controllerKeyFlag = flag.Int("controller", 1, "controllerKeyFlag?")
 
 func processOverride(u *url.URL) {
 	envUsername := os.Getenv(envUserName)
@@ -114,9 +127,6 @@ func exit(err error) {
 }
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	flag.Parse()
 
 	// Parse URL from string
@@ -129,7 +139,7 @@ func main() {
 	processOverride(u)
 
 	// Connect and log in to ESX or vCenter
-	c, err := govmomi.NewClient(ctx, u, *insecureFlag)
+	c, err := govmomi.NewClient(context.TODO(), u, *insecureFlag)
 	if err != nil {
 		exit(err)
 	}
@@ -137,7 +147,7 @@ func main() {
 	f := find.NewFinder(c.Client, true)
 
 	// Find one and only datacenter
-	dc, err := f.DefaultDatacenter(ctx)
+	dc, err := f.DefaultDatacenter(context.TODO())
 	if err != nil {
 		exit(err)
 	}
@@ -146,7 +156,7 @@ func main() {
 	f.SetDatacenter(dc)
 
 	// Find datastores in datacenter
-	dss, err := f.DatastoreList(ctx, "*")
+	dss, err := f.DatastoreList(context.TODO(), "*")
 	if err != nil {
 		exit(err)
 	}
@@ -161,7 +171,7 @@ func main() {
 
 	// Retrieve summary property for all datastores
 	var dst []mo.Datastore
-	err = pc.Retrieve(ctx, refs, []string{"summary"}, &dst)
+	err = pc.Retrieve(context.TODO(), refs, []string{"summary"}, &dst)
 	if err != nil {
 		exit(err)
 	}
@@ -177,4 +187,306 @@ func main() {
 		fmt.Fprintf(tw, "\n")
 	}
 	tw.Flush()
+
+	fmt.Printf("\n")
+
+	//get vms '*' for path
+	vms, err := f.VirtualMachineList(context.TODO(), *pathFlag)
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+	for _, vm := range vms {
+		name, err := vm.Name(context.TODO())
+		if err != nil {
+			fmt.Printf("something went wrong: %s\n", err.Error())
+			os.Exit(-1)
+		}
+		fmt.Printf("\t %s\n\n", name)
+		managedVms := []mo.VirtualMachine{}
+		pc := property.DefaultCollector(vm.Client())
+		refs := make([]types.ManagedObjectReference, 0, len(vms))
+		refs = append(refs, vm.Reference())
+		err = pc.Retrieve(context.TODO(), refs, nil, &managedVms)
+		for _, managedVm := range managedVms {
+			fmt.Printf("managed vm for vm: %v\n", managedVm)
+		}
+	}
+
+	fmt.Printf("\n")
+	fmt.Printf("\n")
+	fmt.Printf("\n")
+	fmt.Printf("\n")
+
+	vimClient, err := newClient(u)
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+
+	datacenter, err := f.DefaultDatacenter(context.TODO())
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+	fmt.Printf("using datacenter %v...\n", datacenter)
+
+	dcFolders, err := datacenter.Folders(context.TODO())
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+	fmt.Printf("using datacenter folders %v...\n", dcFolders)
+
+	datastore, err := f.DefaultDatastore(context.TODO())
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+	fmt.Printf("using default datastore %v...\n", datastore)
+
+	resourcePool, err := f.DefaultResourcePool(context.TODO())
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+	fmt.Printf("using default resource pool %v...\n", resourcePool)
+
+	host, err := f.DefaultHostSystem(context.TODO())
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+	fmt.Printf("using default host %v...\n", host)
+
+//	fmt.Printf("finding unik folder in %v...\n", dcFolders.DatastoreFolder)
+//	unikFolder, datastoreObject, err := findSubFolder(dcFolders.DatastoreFolder, "unik")
+//	fmt.Printf("default datastore: %v, sub-datastore: %v, they are the same=%v...\n", datastore, datastoreObject, datastore == datastoreObject)
+//	if datastoreObject != nil {
+//		datastoreObject
+//	}
+//	if err != nil {
+//		fmt.Printf("unik folder not found (error: %s), creating...\n", err.Error())
+//
+//		unikFolder, err = dcFolders.DatastoreFolder.CreateFolder(context.TODO(), "unik")
+//		if err != nil {
+//			fmt.Printf("something went wrong: %s\n", err.Error())
+//			os.Exit(-1)
+//		}
+//	}
+//
+
+	m := object.NewFileManager(vimClient)
+	fmt.Printf("creating unik folder...\n")
+	err = m.MakeDirectory(context.TODO(), "["+datastore.Name()+"] unik", dc, true)
+	if err != nil {
+		fmt.Printf("there was an error, do we care tho? %s\n", err.Error())
+	}
+
+	fmt.Printf("finding unik folder...\n")
+	unikFolder, err := f.Folder(context.TODO(), "unik")
+	if err != nil {
+		fmt.Printf("something went wrong: %s\n", err.Error())
+		os.Exit(-1)
+	}
+
+	fmt.Printf("using unik folder %v...\n", unikFolder)
+
+	//	falseRef := false
+	//	fmt.Printf("ControllerKey: %v\n", *controllerKeyFlag)
+	//	virtualDeviceConfigSpec := types.VirtualDeviceConfigSpec{
+	//		Operation: types.VirtualDeviceConfigSpecOperationAdd,
+	//		Device:  &types.VirtualDisk{
+	//			VirtualDevice: types.VirtualDevice{
+	//				Key: 0,
+	//				UnitNumber: 1,
+	//				//				ControllerKey: *controllerKeyFlag,
+	//				Backing: &types.VirtualDiskFlatVer2BackingInfo{
+	//					VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{
+	//						FileName: *vmdkAbsolutePathFlag,
+	//					},
+	//					DiskMode: string(types.VirtualDiskModeNonpersistent),
+	//					Split: &falseRef,
+	//					WriteThrough: &falseRef,
+	//					ThinProvisioned: &falseRef,
+	//					EagerlyScrub: &falseRef,
+	//				},
+	//			},
+	//		},
+	//	}
+	//
+	//	virtualMachineConfigSpec := types.VirtualMachineConfigSpec{
+	//		Name: *nameFlag,
+	//		DeviceChange: []types.BaseVirtualDeviceConfigSpec{
+	//			&virtualDeviceConfigSpec,
+	//		},
+	//		Files: &types.VirtualMachineFileInfo{
+	//			VmPathName: fmt.Sprintf("[datastore1]/osv/osv.vmx"),
+	//		},
+	//	}
+	//
+	//	fmt.Printf("creating vm with spec %v...\n", virtualMachineConfigSpec)
+	//	createVmTask, err := dcFolders.VmFolder.CreateVM(context.TODO(), virtualMachineConfigSpec, resourcePool, host)
+	//	if err != nil {
+	//		fmt.Printf("something went wrong: %s\n", err.Error())
+	//		os.Exit(-1)
+	//	}
+	//	fmt.Printf("started create vm task %v...\n", createVmTask)
+	//	err = createVmTask.Wait(context.TODO())
+	//	if err != nil {
+	//		fmt.Printf("something went wrong: %s\n", err.Error())
+	//		os.Exit(-1)
+	//	}
+
+	fmt.Printf("finished!!! wtf??\n")
+
+	//	ovfManager := object.NewOvfManager(vimClient)
+	//
+	//	archive := &importx.FileArchive{fpath}
+	//
+	//	cisp := types.OvfCreateImportSpecParams{
+	//		DiskProvisioning:   "thin",
+	//		EntityName:         *nameFlag,
+	//		IpAllocationPolicy: "dhcpPolicy",
+	//		IpProtocol:         "IPv4",
+	//		OvfManagerCommonParams: types.OvfManagerCommonParams{
+	//			DeploymentOption: "small",
+	//			Locale:           "US"},
+	//		PropertyMapping:.Map(.Options.PropertyMapping),
+	//	}
+	//
+	//	ovfManager.CreateDescriptor()
+
+}
+
+
+func newClient(u *url.URL) (*vim25.Client, error) {
+	sc := soap.NewClient(u, true)
+	isTunnel := false
+
+	// Add retry functionality before making any calls
+	rt := attachRetries(sc)
+	c, err := vim25.NewClient(context.TODO(), rt)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set client, since we didn't pass it in the constructor
+	c.Client = sc
+
+	m := session.NewManager(c)
+	user := u.User
+	if isTunnel {
+		err = m.LoginExtensionByCertificate(context.TODO(), user.Username(), "")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		err = m.Login(context.TODO(), user)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return c, nil
+}
+
+// Retry twice when a temporary I/O error occurs.
+// This means a maximum of 3 attempts.
+func attachRetries(rt soap.RoundTripper) soap.RoundTripper {
+	return vim25.Retry(rt, vim25.TemporaryNetworkError(3))
+}
+
+func ReadOvf(archive *importx.FileArchive, fpath string) ([]byte, error) {
+	r, _, err := archive.Open(fpath)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	return ioutil.ReadAll(r)
+}
+
+func ReadEnvelope(archive *importx.FileArchive, fpath string) (*ovf.Envelope, error) {
+	if fpath == "" {
+		return nil, nil
+	}
+
+	r, _, err := archive.Open(fpath)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	e, err := ovf.Unmarshal(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ovf: %s", err.Error())
+	}
+
+	return e, nil
+}
+
+func findSubFolder(rootFolder *object.Folder, name string) (*object.Folder, *object.Datastore, error) {
+	fmt.Printf("Searching folder %s for %s ...\n", rootFolder.String(), name)
+	if strings.Contains(rootFolder.String(), name) {
+		fmt.Printf("Found folder %s\n", rootFolder.String())
+		return rootFolder, nil, nil
+	}
+	children, err := rootFolder.Children(context.TODO())
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, child := range children {
+		fmt.Printf("child %s:%s...\n", child.Reference().Type, child.Reference().Value)
+		if subFolder, ok := child.(*object.Folder); ok {
+			fmt.Printf("Subfolder %s ...\n", subFolder.String())
+			subSubFolder, _, err := findSubFolder(subFolder, name)
+			if err == nil {
+				return subSubFolder, nil, nil
+			}
+		}
+		if datastore, ok := child.(*object.Datastore); ok {
+			fmt.Printf("datastore %s ...\n", datastore.String())
+			b, err := datastore.Browser(context.TODO())
+			if err != nil {
+				return nil, nil, err
+			}
+			spec := types.HostDatastoreBrowserSearchSpec{
+				MatchPattern: []string{"*"},
+			}
+			fmt.Printf("searching datastore...\n")
+			searchResults, err := ListPath(b, datastore, spec)
+			if err != nil {
+				return nil, nil, err
+			}
+			fmt.Printf("search results %v...\n", searchResults)
+			for _, file := range searchResults.File {
+
+				fmt.Printf("investigating file %v...\n", file)
+			}
+			return nil, datastore, nil
+		}
+	}
+	return nil, nil, errors.New("folder " + name + " not found")
+}
+
+func ListPath(b *object.HostDatastoreBrowser, datastore *object.Datastore, spec types.HostDatastoreBrowserSearchSpec) (types.HostDatastoreBrowserSearchResults, error) {
+	var res types.HostDatastoreBrowserSearchResults
+
+	path := "[datastore1]"
+
+	fmt.Printf("listing path " + path + "\n")
+
+	task, err := b.SearchDatastore(context.TODO(), path, &spec)
+	if err != nil {
+		return res, err
+	}
+
+	info, err := task.WaitForResult(context.TODO(), nil)
+	if err != nil {
+		return res, err
+	}
+
+	res = info.Result.(types.HostDatastoreBrowserSearchResults)
+	return res, nil
 }
