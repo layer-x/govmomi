@@ -44,6 +44,7 @@ import (
 	"github.com/vmware/govmomi/ovf"
 	"github.com/vmware/govmomi/object"
 	"errors"
+	"golang.org/x/net/webdav/internal/xml"
 )
 
 // GetEnvString returns string from environment variable.
@@ -209,7 +210,18 @@ func main() {
 		refs = append(refs, vm.Reference())
 		err = pc.Retrieve(context.TODO(), refs, nil, &managedVms)
 		for _, managedVm := range managedVms {
-			fmt.Printf("managed vm for vm: %v\n", managedVm)
+			fmt.Printf("\nmanaged vm for vm: %v\n\n", managedVm)
+//			fmt.Printf("Config for vm: %v\n", managedVm.Config)
+//			fmt.Printf("ConfigStatus for vm: %v\n", managedVm.ConfigStatus)
+//			fmt.Printf("Guest for vm: %v\n", managedVm.Guest)
+//			fmt.Printf("OverallStatus for vm: %v\n", managedVm.OverallStatus)
+			fmt.Printf("IpAddress for vm: %v\n\n", managedVm.Summary.Guest.IpAddress)
+			fmt.Printf("OverallStatus for vm: %v\n\n", managedVm.Summary.OverallStatus)
+			fmt.Printf("PowerState for vm: %v\n\n", managedVm.Summary.Runtime.PowerState)
+			x, err := xml.Marshal(managedVm.Summary)
+			if err != nil {
+				fmt.Printf("xml summary for vm: %s\n\n", string(x))
+			}
 		}
 	}
 
@@ -259,36 +271,36 @@ func main() {
 	}
 	fmt.Printf("using default host %v...\n", host)
 
-//	fmt.Printf("finding unik folder in %v...\n", dcFolders.DatastoreFolder)
-//	unikFolder, datastoreObject, err := findSubFolder(dcFolders.DatastoreFolder, "unik")
-//	fmt.Printf("default datastore: %v, sub-datastore: %v, they are the same=%v...\n", datastore, datastoreObject, datastore == datastoreObject)
-//	if datastoreObject != nil {
-//		datastoreObject
-//	}
+	fmt.Printf("finding unik subfolder in %v...\n", dcFolders.DatastoreFolder)
+	unikFolder, err := findSubFolder(f, dcFolders.DatastoreFolder, "unik")
+	if err != nil {
+		fmt.Printf("unik folder not found (error: %s), creating...\n", err.Error())
+
+		m := object.NewFileManager(vimClient)
+		fmt.Printf("creating unik folder...\n")
+		err = m.MakeDirectory(context.TODO(), "["+datastore.Name()+"] unik", dc, true)
+		if err != nil {
+			fmt.Printf("failed to find OR create unik folder: %s\n", err.Error())
+			os.Exit(-1)
+		}
+	}
+	fmt.Printf("using unik folder %v...\n", unikFolder)
+
+//	fmt.Printf("finding unik folder...\n")
+//	mos, err := f.ManagedObjectListChildren(context.TODO(), "/ha-datacenter/datastore/datastore1")
 //	if err != nil {
-//		fmt.Printf("unik folder not found (error: %s), creating...\n", err.Error())
-//
-//		unikFolder, err = dcFolders.DatastoreFolder.CreateFolder(context.TODO(), "unik")
-//		if err != nil {
-//			fmt.Printf("something went wrong: %s\n", err.Error())
-//			os.Exit(-1)
-//		}
+//		fmt.Printf("something went wrong getting mo list: %s\n", err.Error())
+//		os.Exit(-1)
 //	}
-//
+//	for _, mo := range mos {
+//		fmt.Printf("discovered managed object: %v\n", mo)
+//	}
 
-	m := object.NewFileManager(vimClient)
-	fmt.Printf("creating unik folder...\n")
-	err = m.MakeDirectory(context.TODO(), "["+datastore.Name()+"] unik", dc, true)
-	if err != nil {
-		fmt.Printf("there was an error, do we care tho? %s\n", err.Error())
-	}
-
-	fmt.Printf("finding unik folder...\n")
-	unikFolder, err := f.Folder(context.TODO(), "unik")
-	if err != nil {
-		fmt.Printf("something went wrong: %s\n", err.Error())
-		os.Exit(-1)
-	}
+//	unikFolder, err := f.Folder(context.TODO(), "")
+//	if err != nil {
+//		fmt.Printf("something went wrong: %s\n", err.Error())
+//		os.Exit(-1)
+//	}
 
 	fmt.Printf("using unik folder %v...\n", unikFolder)
 
@@ -426,30 +438,30 @@ func ReadEnvelope(archive *importx.FileArchive, fpath string) (*ovf.Envelope, er
 	return e, nil
 }
 
-func findSubFolder(rootFolder *object.Folder, name string) (*object.Folder, *object.Datastore, error) {
+func findSubFolder(f *find.Finder ,rootFolder *object.Folder, name string) (*object.Folder, error) {
 	fmt.Printf("Searching folder %s for %s ...\n", rootFolder.String(), name)
 	if strings.Contains(rootFolder.String(), name) {
 		fmt.Printf("Found folder %s\n", rootFolder.String())
-		return rootFolder, nil, nil
+		return rootFolder, nil
 	}
 	children, err := rootFolder.Children(context.TODO())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	for _, child := range children {
 		fmt.Printf("child %s:%s...\n", child.Reference().Type, child.Reference().Value)
 		if subFolder, ok := child.(*object.Folder); ok {
 			fmt.Printf("Subfolder %s ...\n", subFolder.String())
-			subSubFolder, _, err := findSubFolder(subFolder, name)
+			subSubFolder, err := findSubFolder(f, subFolder, name)
 			if err == nil {
-				return subSubFolder, nil, nil
+				return subSubFolder, nil
 			}
 		}
 		if datastore, ok := child.(*object.Datastore); ok {
 			fmt.Printf("datastore %s ...\n", datastore.String())
 			b, err := datastore.Browser(context.TODO())
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			spec := types.HostDatastoreBrowserSearchSpec{
 				MatchPattern: []string{"*"},
@@ -457,17 +469,25 @@ func findSubFolder(rootFolder *object.Folder, name string) (*object.Folder, *obj
 			fmt.Printf("searching datastore...\n")
 			searchResults, err := ListPath(b, datastore, spec)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			fmt.Printf("search results %v...\n", searchResults)
 			for _, file := range searchResults.File {
-
-				fmt.Printf("investigating file %v...\n", file)
+				filePath := file.GetFileInfo().Path
+				fmt.Printf("investigating file %v with path %s (root folder has path %s)...\n", file.GetFileInfo(), file.GetFileInfo().Path, rootFolder.InventoryPath)
+				subFolder, err := f.FolderRecursive(context.TODO(), ".")
+				if err != nil {
+					fmt.Printf("file %s is not a folder (%s), moving on...\n", filePath, err)
+				} else {
+					subSubFolder, err := findSubFolder(f, subFolder, name)
+					if err == nil {
+						return subSubFolder, nil
+					}
+				}
 			}
-			return nil, datastore, nil
 		}
 	}
-	return nil, nil, errors.New("folder " + name + " not found")
+	return nil, errors.New("folder " + name + " not found")
 }
 
 func ListPath(b *object.HostDatastoreBrowser, datastore *object.Datastore, spec types.HostDatastoreBrowserSearchSpec) (types.HostDatastoreBrowserSearchResults, error) {
