@@ -48,6 +48,7 @@ type create struct {
 	on         bool
 	force      bool
 	controller string
+	annotation string
 
 	iso              string
 	isoDatastoreFlag *flags.DatastoreFlag
@@ -110,6 +111,8 @@ func (cmd *create) Register(ctx context.Context, f *flag.FlagSet) {
 	f.StringVar(&cmd.disk, "disk", "", "Disk path (to use existing) OR size (to create new, e.g. 20GB)")
 	cmd.diskDatastoreFlag, ctx = flags.NewCustomDatastoreFlag(ctx)
 	f.StringVar(&cmd.diskDatastoreFlag.Name, "disk-datastore", "", "Datastore for disk file")
+
+	f.StringVar(&cmd.annotation, "annotation", "", "Annotation to give to new entity")
 }
 
 func (cmd *create) Process(ctx context.Context) error {
@@ -315,6 +318,8 @@ func (cmd *create) createVM(ctx context.Context) (*object.Task, error) {
 	spec.Files = &types.VirtualMachineFileInfo{
 		VmPathName: fmt.Sprintf("[%s]", datastore.Name()),
 	}
+
+	spec.Annotation = cmd.annotation
 
 	return folders.VmFolder.CreateVM(ctx, *spec, cmd.ResourcePool, cmd.HostSystem)
 }
